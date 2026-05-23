@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <title>Quest Teleop</title>
+  <style>
+    body { font-family: monospace; background: #111; color: #eee; padding: 1rem; margin: 0; }
+    h2 { color: #58a6ff; margin: 0 0 .5rem 0; }
+    #status { color: #3fb950; margin-bottom: .75rem; font-size: .95rem; }
+    button { padding: .6rem 1.5rem; font-size: 1rem; border-radius: .4rem;
+             background: #238636; color: #fff; border: none; cursor: pointer; margin-bottom: 1rem; }
+    button:disabled { opacity: .4; cursor: default; }
+    .hand { background: rgba(26,26,46,0.9); border-radius: .5rem;
+            padding: .75rem 1rem; margin-bottom: .75rem; }
+    .hand h3 { margin: 0 0 .4rem 0; font-size: 1rem; color: #e3b341; }
+    table { border-collapse: collapse; width: 100%; }
+    td { padding: .15rem .4rem; font-size: .82rem; }
+    td:first-child { color: #888; width: 5rem; }
+  </style>
+</head>
+<body>
+  <h2>Quest Controller Data</h2>
+  <div id="status">Connecting…</div>
+  <button id="btn" disabled>Enter VR</button>
+
+  <div class="hand">
+    <h3>Left Controller</h3>
+    <table>
+      <tr><td>pos</td>     <td id="l-pos">—</td></tr>
+      <tr><td>quat</td>    <td id="l-ori">—</td></tr>
+      <tr><td>trigger</td> <td id="l-trig">—</td></tr>
+      <tr><td>grip</td>    <td id="l-grip">—</td></tr>
+    </table>
+  </div>
+
+  <div class="hand">
+    <h3>Right Controller</h3>
+    <table>
+      <tr><td>pos</td>     <td id="r-pos">—</td></tr>
+      <tr><td>quat</td>    <td id="r-ori">—</td></tr>
+      <tr><td>trigger</td> <td id="r-trig">—</td></tr>
+      <tr><td>grip</td>    <td id="r-grip">—</td></tr>
+    </table>
+  </div>
+
+  <canvas id="c" style="display:none"></canvas>
+
+  <script>
+    const statusEl = document.getElementById('status');
+    const btn      = document.getElementById('btn');
+    const canvas   = document.getElementById('c');
+
+    // ── WebSocket ──────────────────────────────────────────────────────────
+    let ws;
+    function connectWS() {
+      ws = new WebSocket(`ws://${location.hostname}:5005`);
+      ws.onopen  = () => { statusEl.textContent = 'Connected ✔  — press Enter VR'; btn.disabled = false; };
+      ws.onclose = () => { statusEl.textContent = 'Reconnecting…'; btn.disabled = true; setTimeout(connectWS, 2000); };
+      ws.onerror = () => ws.close();
+    }
+    connectWS();
+
+    // ── UI elements ────────────────────────────────────────────────────────
+    const ui = {
+      left:  { pos: document.getElementById('l-pos'), ori: document.getElementById('l-ori'),
+               trig: document.getElementById('l-trig'), grip: document.getElementById('l-grip') },
+      right: { pos: document.getElementById('r-pos'), ori: document.getElementById('r-ori'),
+               trig: document.getElementById('r-trig'), grip: document.getElementById('r-grip') },
+    };
+
+    const f3 = (x,y,z)   => `${x.toFixed(3)}, ${y.toFixed(3)}, ${z.toFixed(3)}`;
+    const f4 = (x,y,z,w) => `${x.toFixed(3)}, ${y.toFixed(3)}, ${z.toFixed(3)}, ${w.toFixed(3)}`;
+
+    // ── Enter immersive-vr with dom-overlay ────────────────────────────────
+    btn.addEventListener('click', async () => {
+      btn.disabled = true;
+      try {
+        const gl = canvas.getContext('webgl2', { xrCompatible: true });
+
+        const session = await navigator.xr.requestSession('immersive-vr', {
+          optionalFeatures: ['local-floor', 'dom-overlay'],
+          domOverlay: { root: document.body },
+        });
+
+        await session.updateRenderState({ baseLayer: new XRWebGLLayer(session, gl) });
+
+        const refSpace = await session.requestReferenceSpace('local-floor')
+                           .catch(() => session.requestReferenceSpace('local'));
+
+        session.addEventListener('end', () => {
+          statusEl.textContent = 'Session ended — press Enter VR to restart';
+          btn.disabled = false;
+        });
+
+        statusEl.textContent = 'VR active';
+
+        function onFrame(t, xrFrame) {
+          session.requestAnimationFrame(onFrame);
+
+          // Must submit frames to keep session alive
+          const layer = session.renderState.baseLayer;
+          gl.bindFramebuffer(gl.FRAMEBUFFER, layer.framebuffer);
+          gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+          const payload = {};
+
+          for (const src of xrFrame.session.inputSources) {
+            const h = src.handedness;   // 'left' | 'right'
+            if (h !== 'left' && h !== 'right') continue;
+            if (!src.gamepad) continue;
+
+            const trigger = src.gamepad.buttons[0]?.value ?? 0;
+            const grip    = src.gamepad.buttons[1]?.value ?? 0;
+            let posArr = null, oriArr = null;
+
+            if (src.gripSpace) {
+              const pose = xrFrame.getPose(src.gripSpace, refSpace);
+              if (pose) {
+                const p = pose.transform.position;
+                const q = pose.transform.orientation;
+                posArr = [p.x, p.y, p.z];
+                oriArr = [q.x, q.y, q.z, q.w];
+                ui[h].pos.textContent = f3(p.x, p.y, p.z);
+                ui[h].ori.textContent = f4(q.x, q.y, q.z, q.w);
+              }
+            }
+            ui[h].trig.textContent = trigger.toFixed(3);
+            ui[h].grip.textContent = grip.toFixed(3);
+            payload[h] = { pos: posArr, ori: oriArr, trigger, grip };
+          }
+
+          if (ws.readyState === WebSocket.OPEN && Object.keys(payload).length) {
+            ws.send(JSON.stringify(payload));
+          }
+        }
+
+        session.requestAnimationFrame(onFrame);
+      } catch (e) {
+        statusEl.textContent = `XR Error: ${e.message}`;
+        btn.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>

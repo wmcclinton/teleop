@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <title>VR Scene</title>
+  <style>
+    body { margin: 0; overflow: hidden; background: #000; }
+    #status { position: absolute; top: 1rem; left: 1rem;
+              font-family: monospace; font-size: .9rem; color: #3fb950;
+              pointer-events: none; z-index: 10; }
+  </style>
+</head>
+<body>
+  <div id="status">Connecting…</div>
+
+  <!-- Import map: all Three.js served locally via HTTP server -->
+  <script type="importmap">
+  {
+    "imports": {
+      "three":          "/node_modules/three/build/three.module.min.js",
+      "three/addons/":  "/node_modules/three/examples/jsm/"
+    }
+  }
+  </script>
+
+  <script type="module">
+    import * as THREE from 'three';
+    import { VRButton } from 'three/addons/webxr/VRButton.js';
+
+    // ── Renderer ────────────────────────────────────────────────────────────
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setPixelRatio(devicePixelRatio);
+    renderer.setSize(innerWidth, innerHeight);
+    renderer.xr.enabled = true;
+    document.body.appendChild(renderer.domElement);
+
+    window.addEventListener('resize', () => {
+      camera.aspect = innerWidth / innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(innerWidth, innerHeight);
+    });
+
+    // ── Scene ───────────────────────────────────────────────────────────────
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x1a1a2e);
+
+    const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.01, 50);
+    camera.position.set(0, 1.6, 2);
+
+    // Lighting
+    scene.add(new THREE.AmbientLight(0xffffff, 0.5));
+    const sun = new THREE.DirectionalLight(0xffffff, 1.0);
+    sun.position.set(3, 5, 3);
+    scene.add(sun);
+
+    // Grid floor
+    scene.add(new THREE.GridHelper(6, 6, 0x445566, 0x334455));
+
+    // ── Hand cubes ──────────────────────────────────────────────────────────
+    // Unit geometry — scale drives the visual size
+    const cubeGeo = new THREE.BoxGeometry(1, 1, 1);
+
+    function makeHandCube(color) {
+      const mesh = new THREE.Mesh(
+        cubeGeo,
+        new THREE.MeshPhongMaterial({ color, transparent: true, opacity: 0.45 })
+      );
+      // Edges so orientation is obvious
+      mesh.add(new THREE.LineSegments(
+        new THREE.EdgesGeometry(cubeGeo),
+        new THREE.LineBasicMaterial({ color: 0xffffff, opacity: 0.6, transparent: true })
+      ));
+      return mesh;
+    }
+
+    const hands = {
+      left:  makeHandCube(0xe3b341),  // gold
+      right: makeHandCube(0x3fb950),  // green
+    };
+
+    // Park them somewhere visible before VR starts
+    hands.left.position.set(-0.3, 1.4, -0.8);
+    hands.right.position.set( 0.3, 1.4, -0.8);
+
+    const BASE = 0.06;   // metres when trigger = 0
+    const MAX  = 0.18;   // metres when trigger = 1
+    Object.values(hands).forEach(h => { h.scale.setScalar(BASE); scene.add(h); });
+
+    // ── WebSocket ───────────────────────────────────────────────────────────
+    const statusEl = document.getElementById('status');
+    let ws, lastSend = 0;
+
+    function connectWS() {
+      ws = new WebSocket(`ws://${location.hostname}:5005`);
+      ws.onopen  = () => { statusEl.textContent = 'Connected ✔'; };
+      ws.onclose = () => { statusEl.textContent = 'WS reconnecting…'; setTimeout(connectWS, 2000); };
+      ws.onerror = () => ws.close();
+    }
+    connectWS();
+
+    // ── VR Button ───────────────────────────────────────────────────────────
+    document.body.appendChild(VRButton.createButton(renderer));
+
+    // ── Render loop ─────────────────────────────────────────────────────────
+    renderer.setAnimationLoop((time, frame) => {
+      if (frame) {
+        const refSpace = renderer.xr.getReferenceSpace();
+        const payload  = {};
+
+        for (const src of frame.session.inputSources) {
+          const h = src.handedness;
+          if (h !== 'left' && h !== 'right') continue;
+          if (!src.gamepad) continue;
+
+          const trigger = src.gamepad.buttons[0]?.value ?? 0;
+          const grip    = src.gamepad.buttons[1]?.value ?? 0;
+
+          // Size tracks trigger regardless of grip state
+          hands[h].scale.setScalar(BASE + trigger * (MAX - BASE));
+
+          if (grip > 0.1 && src.gripSpace) {
+            // Grip held → cube follows controller
+            const pose = frame.getPose(src.gripSpace, refSpace);
+            if (pose) {
+              const p = pose.transform.position;
+              const q = pose.transform.orientation;
+              hands[h].position.set(p.x, p.y, p.z);
+              hands[h].quaternion.set(q.x, q.y, q.z, q.w);
+              hands[h].material.opacity = 0.85;
+              payload[h] = { pos: [p.x, p.y, p.z], ori: [q.x, q.y, q.z, q.w], trigger, grip };
+            }
+          } else {
+            // Grip released → cube stays, dim it
+            hands[h].material.opacity = 0.35;
+          }
+        }
+
+        const now = Date.now();
+        if (now - lastSend > 50 && ws?.readyState === WebSocket.OPEN && Object.keys(payload).length) {
+          ws.send(JSON.stringify(payload));
+          lastSend = now;
+        }
+      }
+
+      renderer.render(scene, camera);
+    });
+  </script>
+</body>
+</html>
