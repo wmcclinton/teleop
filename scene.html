@@ -56,6 +56,27 @@
     // Grid floor
     scene.add(new THREE.GridHelper(6, 6, 0x445566, 0x334455));
 
+    // ── Webcam feed (MJPEG from Mac → canvas texture) ──────────────────────
+    const camCanvas = document.createElement('canvas');
+    camCanvas.width  = 640;
+    camCanvas.height = 480;
+    const camCtx = camCanvas.getContext('2d');
+
+    const camTex = new THREE.CanvasTexture(camCanvas);
+    camTex.minFilter = THREE.LinearFilter;
+    camTex.magFilter = THREE.LinearFilter;
+
+    const screen = new THREE.Mesh(
+      new THREE.PlaneGeometry(4/3, 1),   // 4:3 — matches 640×480
+      new THREE.MeshBasicMaterial({ map: camTex })
+    );
+    screen.position.set(0, 1.6, -2.5);
+    scene.add(screen);
+
+    const camImg = document.createElement('img');
+    camImg.crossOrigin = 'anonymous';
+    camImg.src = '/video';
+
     // ── Hand cubes ──────────────────────────────────────────────────────────
     // Unit geometry — scale drives the visual size
     const cubeGeo = new THREE.BoxGeometry(1, 1, 1);
@@ -103,6 +124,11 @@
 
     // ── Render loop ─────────────────────────────────────────────────────────
     renderer.setAnimationLoop((time, frame) => {
+      // Pull latest MJPEG frame into the canvas texture
+      try {
+        camCtx.drawImage(camImg, 0, 0, camCanvas.width, camCanvas.height);
+        camTex.needsUpdate = true;
+      } catch (_) {}
       if (frame) {
         const refSpace = renderer.xr.getReferenceSpace();
         const payload  = {};

@@ -1,16 +1,65 @@
-import asyncio, functools, http.server, json, os, threading, websockets
+import asyncio, functools, http.server, json, os, threading, time, websockets
+import cv2
 
 HTTP_PORT = 8080
 WS_PORT   = 5005
 
-class _QuietHandler(http.server.SimpleHTTPRequestHandler):
+# ── Webcam capture ───────────────────────────────────────────────────────────
+_frame_lock = threading.Lock()
+_jpeg_frame = b''
+
+def _capture_loop():
+    global _jpeg_frame
+    cap = cv2.VideoCapture(0)
+    if not cap.isOpened():
+        print("[CAM] could not open webcam")
+        return
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH,  640)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+    print("[CAM] webcam open")
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            time.sleep(0.05)
+            continue
+        _, jpeg = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
+        with _frame_lock:
+            _jpeg_frame = jpeg.tobytes()
+
+threading.Thread(target=_capture_loop, daemon=True).start()
+
+# ── HTTP server ──────────────────────────────────────────────────────────────
+class _Handler(http.server.SimpleHTTPRequestHandler):
     def log_message(self, *a): pass
+
+    def do_GET(self):
+        if self.path == '/video':
+            self._stream_mjpeg()
+        else:
+            super().do_GET()
+
+    def _stream_mjpeg(self):
+        self.send_response(200)
+        self.send_header('Content-Type', 'multipart/x-mixed-replace; boundary=frame')
+        self.send_header('Cache-Control', 'no-cache')
+        self.end_headers()
+        try:
+            while True:
+                with _frame_lock:
+                    frame = _jpeg_frame
+                if frame:
+                    self.wfile.write(
+                        b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + frame + b'\r\n'
+                    )
+                time.sleep(1 / 30)
+        except Exception:
+            pass
 
 def _run_http():
     here    = os.path.dirname(os.path.abspath(__file__))
-    handler = functools.partial(_QuietHandler, directory=here)
-    with http.server.HTTPServer(("0.0.0.0", HTTP_PORT), handler) as httpd:
-        print(f"[HTTP] serving at http://0.0.0.0:{HTTP_PORT}")
+    handler = functools.partial(_Handler, directory=here)
+    with http.server.ThreadingHTTPServer(("0.0.0.0", HTTP_PORT), handler) as httpd:
+        print(f"[HTTP] http://0.0.0.0:{HTTP_PORT}")
         print(f"[HTTP] open on Quest: http://localhost:{HTTP_PORT}/scene.html")
         httpd.serve_forever()
 
