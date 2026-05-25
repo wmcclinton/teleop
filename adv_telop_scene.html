@@ -1,0 +1,524 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <title>VR Robot Advanced Teleop Scene</title>
+
+  <style>
+    body {
+      margin: 0;
+      overflow: hidden;
+      background: #000;
+    }
+
+    #status {
+      position: absolute;
+      top: 1rem;
+      left: 1rem;
+      font-family: monospace;
+      font-size: 0.9rem;
+      line-height: 1.35;
+      color: #3fb950;
+      background: rgba(0, 0, 0, 0.55);
+      padding: 0.75rem;
+      border-radius: 0.5rem;
+      pointer-events: none;
+      z-index: 10;
+      white-space: pre;
+      max-width: 90vw;
+    }
+
+    #controls {
+      position: absolute;
+      bottom: 1rem;
+      left: 1rem;
+      font-family: monospace;
+      font-size: 0.85rem;
+      line-height: 1.35;
+      color: #ffffff;
+      background: rgba(0, 0, 0, 0.55);
+      padding: 0.75rem;
+      border-radius: 0.5rem;
+      pointer-events: none;
+      z-index: 10;
+      white-space: pre;
+    }
+  </style>
+</head>
+
+<body>
+  <div id="status">Connecting…</div>
+
+  <div id="controls">A: forward
+B: backward
+X: turn left
+Y: turn right
+
+Right joystick: head pan/tilt
+Grip: arm/end-effector deadman
+Trigger held: close gripper
+Trigger released: open gripper
+Move controller while gripping: arm motion</div>
+
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "/node_modules/three/build/three.module.min.js",
+      "three/addons/": "/node_modules/three/examples/jsm/"
+    }
+  }
+  </script>
+
+  <script type="module">
+    import * as THREE from 'three';
+    import { VRButton } from 'three/addons/webxr/VRButton.js';
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setPixelRatio(devicePixelRatio);
+    renderer.setSize(innerWidth, innerHeight);
+    renderer.xr.enabled = true;
+    document.body.appendChild(renderer.domElement);
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x1a1a2e);
+
+    const camera = new THREE.PerspectiveCamera(
+      70,
+      innerWidth / innerHeight,
+      0.01,
+      50
+    );
+    camera.position.set(0, 1.6, 2);
+
+    window.addEventListener('resize', () => {
+      camera.aspect = innerWidth / innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(innerWidth, innerHeight);
+    });
+
+    scene.add(new THREE.AmbientLight(0xffffff, 0.5));
+
+    const sun = new THREE.DirectionalLight(0xffffff, 1.0);
+    sun.position.set(3, 5, 3);
+    scene.add(sun);
+
+    scene.add(new THREE.GridHelper(6, 6, 0x445566, 0x334455));
+
+    // =========================================================================
+    // Robot camera feed
+    // =========================================================================
+
+    const camCanvas = document.createElement('canvas');
+    camCanvas.width = 640;
+    camCanvas.height = 480;
+
+    const camCtx = camCanvas.getContext('2d');
+
+    camCtx.fillStyle = '#111111';
+    camCtx.fillRect(0, 0, camCanvas.width, camCanvas.height);
+    camCtx.fillStyle = '#3fb950';
+    camCtx.font = '32px monospace';
+    camCtx.textAlign = 'center';
+    camCtx.fillText('Waiting for robot camera...', 320, 240);
+
+    const camTex = new THREE.CanvasTexture(camCanvas);
+    camTex.minFilter = THREE.LinearFilter;
+    camTex.magFilter = THREE.LinearFilter;
+    camTex.needsUpdate = true;
+
+    const screenBorder = new THREE.Mesh(
+      new THREE.PlaneGeometry(1.7, 1.3),
+      new THREE.MeshBasicMaterial({
+        color: 0x000000,
+        side: THREE.DoubleSide,
+      })
+    );
+    screenBorder.position.set(0, 1.55, -2.21);
+    scene.add(screenBorder);
+
+    const screen = new THREE.Mesh(
+      new THREE.PlaneGeometry(1.6, 1.2),
+      new THREE.MeshBasicMaterial({
+        map: camTex,
+        side: THREE.DoubleSide,
+      })
+    );
+    screen.position.set(0, 1.55, -2.2);
+    scene.add(screen);
+
+    const camImg = document.createElement('img');
+    camImg.crossOrigin = 'anonymous';
+    camImg.src = '/robot_video';
+
+    let lastCameraDraw = 0;
+    let cameraFrameCount = 0;
+
+    camImg.onerror = () => {
+      console.warn('Robot camera image error');
+    };
+
+    // =========================================================================
+    // Hand cubes
+    // =========================================================================
+
+    const cubeGeo = new THREE.BoxGeometry(1, 1, 1);
+
+    function makeHandCube(color) {
+      const mesh = new THREE.Mesh(
+        cubeGeo,
+        new THREE.MeshPhongMaterial({
+          color,
+          transparent: true,
+          opacity: 0.45
+        })
+      );
+
+      mesh.add(
+        new THREE.LineSegments(
+          new THREE.EdgesGeometry(cubeGeo),
+          new THREE.LineBasicMaterial({
+            color: 0xffffff,
+            opacity: 0.6,
+            transparent: true
+          })
+        )
+      );
+
+      return mesh;
+    }
+
+    const hands = {
+      left: makeHandCube(0xe3b341),
+      right: makeHandCube(0x3fb950),
+    };
+
+    hands.left.position.set(-0.3, 1.4, -0.8);
+    hands.right.position.set(0.3, 1.4, -0.8);
+
+    const BASE = 0.06;
+    const MAX = 0.18;
+
+    Object.values(hands).forEach((h) => {
+      h.scale.setScalar(BASE);
+      scene.add(h);
+    });
+
+    // =========================================================================
+    // Button indicators
+    // =========================================================================
+
+    const buttonPanel = new THREE.Group();
+    buttonPanel.position.set(0, 0.55, -1.35);
+    scene.add(buttonPanel);
+
+    const buttonMeshes = {};
+
+    function makeButtonIndicator(label, x, y, color) {
+      const geo = new THREE.CircleGeometry(0.08, 32);
+      const mat = new THREE.MeshBasicMaterial({
+        color,
+        transparent: true,
+        opacity: 0.35,
+      });
+
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.position.set(x, y, 0);
+      buttonPanel.add(mesh);
+
+      buttonMeshes[label] = mesh;
+
+      const c = document.createElement('canvas');
+      c.width = 128;
+      c.height = 128;
+
+      const ctx = c.getContext('2d');
+      ctx.clearRect(0, 0, 128, 128);
+      ctx.fillStyle = 'white';
+      ctx.font = 'bold 72px monospace';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(label, 64, 64);
+
+      const tex = new THREE.CanvasTexture(c);
+
+      const labelMesh = new THREE.Mesh(
+        new THREE.PlaneGeometry(0.16, 0.16),
+        new THREE.MeshBasicMaterial({
+          map: tex,
+          transparent: true,
+        })
+      );
+
+      labelMesh.position.set(x, y, 0.01);
+      buttonPanel.add(labelMesh);
+    }
+
+    makeButtonIndicator('X', -0.30, 0.00, 0xe3b341);
+    makeButtonIndicator('Y', -0.10, 0.00, 0xe3b341);
+    makeButtonIndicator('A',  0.10, 0.00, 0x3fb950);
+    makeButtonIndicator('B',  0.30, 0.00, 0x3fb950);
+
+    function setButtonIndicator(label, pressed) {
+      const mesh = buttonMeshes[label];
+      if (!mesh) return;
+
+      mesh.material.opacity = pressed ? 1.0 : 0.35;
+      mesh.scale.setScalar(pressed ? 1.25 : 1.0);
+    }
+
+    // =========================================================================
+    // Head joystick visual indicator
+    // =========================================================================
+
+    const joyGroup = new THREE.Group();
+    joyGroup.position.set(0, 0.82, -1.35);
+    scene.add(joyGroup);
+
+    const joyBase = new THREE.Mesh(
+      new THREE.CircleGeometry(0.12, 32),
+      new THREE.MeshBasicMaterial({
+        color: 0x555555,
+        transparent: true,
+        opacity: 0.35,
+      })
+    );
+    joyGroup.add(joyBase);
+
+    const joyDot = new THREE.Mesh(
+      new THREE.CircleGeometry(0.035, 16),
+      new THREE.MeshBasicMaterial({
+        color: 0x3fb950,
+        transparent: true,
+        opacity: 0.9,
+      })
+    );
+    joyDot.position.set(0, 0, 0.01);
+    joyGroup.add(joyDot);
+
+    function updateJoystickVisual(x, y) {
+      joyDot.position.set(x * 0.10, -y * 0.10, 0.01);
+    }
+
+    // =========================================================================
+    // WebSocket
+    // =========================================================================
+
+    const statusEl = document.getElementById('status');
+
+    let ws = null;
+    let lastSend = 0;
+    let packetCount = 0;
+    let lastRightJoy = [0, 0];
+
+    function connectWS() {
+      const url = `ws://${location.hostname}:5005`;
+      ws = new WebSocket(url);
+
+      ws.onopen = () => {
+        statusEl.textContent = `Connected ✔\n${url}`;
+      };
+
+      ws.onclose = () => {
+        statusEl.textContent = 'WS reconnecting…';
+        setTimeout(connectWS, 2000);
+      };
+
+      ws.onerror = () => {
+        try {
+          ws.close();
+        } catch (_) {}
+      };
+    }
+
+    connectWS();
+
+    document.body.appendChild(VRButton.createButton(renderer));
+
+    // =========================================================================
+    // Gamepad helpers
+    // =========================================================================
+
+    function rawButtonsFromGamepad(gamepad) {
+      if (!gamepad || !gamepad.buttons) return [];
+
+      return gamepad.buttons.map((b, i) => ({
+        i,
+        pressed: !!b.pressed,
+        touched: !!b.touched,
+        value: Number(b.value || 0),
+      }));
+    }
+
+    function pressedIndices(rawButtons) {
+      return rawButtons
+        .filter((b) => b.pressed || b.value > 0.5)
+        .map((b) => b.i);
+    }
+
+    function readQuestButtons(handedness, gamepad) {
+      const PRIMARY_INDEX = 4;
+      const SECONDARY_INDEX = 5;
+
+      const primaryPressed =
+        gamepad.buttons[PRIMARY_INDEX]?.pressed ||
+        gamepad.buttons[PRIMARY_INDEX]?.value > 0.5 ||
+        false;
+
+      const secondaryPressed =
+        gamepad.buttons[SECONDARY_INDEX]?.pressed ||
+        gamepad.buttons[SECONDARY_INDEX]?.value > 0.5 ||
+        false;
+
+      const out = {};
+
+      if (handedness === 'right') {
+        out.A = primaryPressed;
+        out.B = secondaryPressed;
+      }
+
+      if (handedness === 'left') {
+        out.X = primaryPressed;
+        out.Y = secondaryPressed;
+      }
+
+      return out;
+    }
+
+    function getJoystickAxes(gamepad) {
+      const axes = gamepad.axes ? Array.from(gamepad.axes) : [];
+      return axes.map((v) => Number(v || 0));
+    }
+
+    function getThumbstickXY(axes) {
+      if (axes.length >= 4) {
+        return [axes[2] || 0, axes[3] || 0];
+      }
+      if (axes.length >= 2) {
+        return [axes[0] || 0, axes[1] || 0];
+      }
+      return [0, 0];
+    }
+
+    // =========================================================================
+    // Render loop
+    // =========================================================================
+
+    renderer.setAnimationLoop((time, frame) => {
+      try {
+        camCtx.drawImage(camImg, 0, 0, camCanvas.width, camCanvas.height);
+        camTex.needsUpdate = true;
+        cameraFrameCount += 1;
+        lastCameraDraw = Date.now();
+      } catch (_) {}
+
+      const payload = {
+        buttons: {
+          A: false,
+          B: false,
+          X: false,
+          Y: false,
+        },
+        rawButtons: {},
+        timestamp: Date.now(),
+      };
+
+      if (frame) {
+        const refSpace = renderer.xr.getReferenceSpace();
+
+        for (const src of frame.session.inputSources) {
+          const h = src.handedness;
+
+          if (h !== 'left' && h !== 'right') continue;
+          if (!src.gamepad) continue;
+
+          const gp = src.gamepad;
+
+          const trigger = gp.buttons[0]?.value ?? 0;
+          const grip = gp.buttons[1]?.value ?? 0;
+          const axes = getJoystickAxes(gp);
+
+          const rawButtons = rawButtonsFromGamepad(gp);
+          payload.rawButtons[h] = rawButtons;
+
+          const namedButtons = readQuestButtons(h, gp);
+          Object.assign(payload.buttons, namedButtons);
+
+          if (h === 'right') {
+            lastRightJoy = getThumbstickXY(axes);
+            updateJoystickVisual(lastRightJoy[0], lastRightJoy[1]);
+          }
+
+          hands[h].scale.setScalar(BASE + trigger * (MAX - BASE));
+
+          if (grip > 0.1 && src.gripSpace) {
+            const pose = frame.getPose(src.gripSpace, refSpace);
+
+            if (pose) {
+              const p = pose.transform.position;
+              const q = pose.transform.orientation;
+
+              hands[h].position.set(p.x, p.y, p.z);
+              hands[h].quaternion.set(q.x, q.y, q.z, q.w);
+              hands[h].material.opacity = 0.85;
+
+              payload[h] = {
+                pos: [p.x, p.y, p.z],
+                ori: [q.x, q.y, q.z, q.w],
+                trigger,
+                grip,
+                axes,
+              };
+            }
+          } else {
+            hands[h].material.opacity = 0.35;
+
+            payload[h] = {
+              trigger,
+              grip,
+              axes,
+            };
+          }
+        }
+      }
+
+      setButtonIndicator('A', payload.buttons.A);
+      setButtonIndicator('B', payload.buttons.B);
+      setButtonIndicator('X', payload.buttons.X);
+      setButtonIndicator('Y', payload.buttons.Y);
+
+      const now = Date.now();
+
+      if (now - lastSend > 50 && ws?.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify(payload));
+        lastSend = now;
+        packetCount += 1;
+      }
+
+      const leftPressed = pressedIndices(payload.rawButtons.left || []);
+      const rightPressed = pressedIndices(payload.rawButtons.right || []);
+
+      const cameraAgeMs = lastCameraDraw ? Date.now() - lastCameraDraw : -1;
+
+      const debug =
+        `A:${payload.buttons.A ? '1' : '0'} ` +
+        `B:${payload.buttons.B ? '1' : '0'} ` +
+        `X:${payload.buttons.X ? '1' : '0'} ` +
+        `Y:${payload.buttons.Y ? '1' : '0'}\n` +
+        `right joy: x=${lastRightJoy[0].toFixed(2)} y=${lastRightJoy[1].toFixed(2)}\n` +
+        `raw left pressed:  [${leftPressed.join(', ')}]\n` +
+        `raw right pressed: [${rightPressed.join(', ')}]\n` +
+        `camera frames: ${cameraFrameCount}\n` +
+        `camera age ms: ${cameraAgeMs}\n` +
+        `packets: ${packetCount}`;
+
+      if (ws?.readyState === WebSocket.OPEN) {
+        statusEl.textContent = `Connected ✔\n${debug}`;
+      } else {
+        statusEl.textContent = `Connecting…\n${debug}`;
+      }
+
+      renderer.render(scene, camera);
+    });
+  </script>
+</body>
+</html>
